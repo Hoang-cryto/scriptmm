@@ -1,205 +1,785 @@
--- Roblox Greedy Growers: Professional Lightning Countdown & Auto-Collect
--- Refactored & Optimized Pro Version
+--[[
+    ╔══════════════════════════════════════╗
+              VĂN KIỀU MENU
+                 by@VanHoang
+    ╚══════════════════════════════════════╝
+
+    Mobile-friendly LocalScript
+    Chức năng:
+    • Fly + chỉnh Fly Speed
+    • Speed + chỉnh Walk Speed
+    • NoClip
+    • Minimize / mở lại menu
+    • Hỗ trợ Touch + PC
+    • Tự xử lý Respawn
+]]
+
 local Players = game:GetService("Players")
-local Workspace = game:GetService("Workspace")
 local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
 
-local LocalPlayer = Players.LocalPlayer
-local Library = loadstring(game:HttpGet("https://raw.githubusercontent.com/shlexware/Orion/main/source"))()
+local Player = Players.LocalPlayer
+local PlayerGui = Player:WaitForChild("PlayerGui")
 
-local Window = Library:MakeWindow({
-    Name = "Greedy Growers Pro Hub | Van Kiều", 
-    HidePremium = false, 
-    SaveConfig = false, 
-    ConfigFolder = "GreedyGrowersPro"
-})
+--==================================================
+-- CONFIG
+--==================================================
 
--- Configuration States
-local Config = {
-    AutoCollect = false,
-    Countdown = true,
-    ScanRadius = 25,
-    TriggerOffset = 1.0 -- Thời gian lấy cây trước khi sét đánh (giây)
-}
+local FLY_SPEED_MIN = 10
+local FLY_SPEED_MAX = 100
+local DEFAULT_FLY_SPEED = 30
 
--- Notification Helper
-local function Notify(title, content, duration)
-    Library:MakeNotification({
-        Name = title,
-        Content = content,
-        Image = "rbxassetid://4483345998",
-        Time = duration or 2
-    })
-end
+local WALK_SPEED_MIN = 8
+local WALK_SPEED_MAX = 100
+local DEFAULT_WALK_SPEED = 16
 
-Notify("Greedy Growers Pro", "Script Pro đã được khởi chạy thành công!", 3)
+local PURPLE = Color3.fromRGB(125, 45, 210)
+local PURPLE_LIGHT = Color3.fromRGB(180, 100, 255)
 
--- Lấy vị trí CFrame/Vector3 an toàn từ mọi loại Instance
-local function GetObjectPosition(obj)
-    if not obj then return nil end
-    if obj:IsA("BasePart") then
-        return obj.Position
-    elseif obj:IsA("Model") then
-        if obj.PrimaryPart then
-            return obj.PrimaryPart.Position
-        end
-        return obj:GetPivot().Position
-    end
-    return nil
-end
+local BG = Color3.fromRGB(12, 12, 15)
+local PANEL = Color3.fromRGB(18, 18, 23)
+local BUTTON = Color3.fromRGB(27, 27, 34)
+local BUTTON_ON = Color3.fromRGB(72, 25, 110)
 
--- Lấy thời gian còn lại của sét bằng cách truy quét thông minh
-local function GetLightningDuration(lightningObj)
-    -- 1. Kiểm tra Attributes
-    local attrs = {"Time", "Duration", "Delay", "Timer"}
-    for _, attr in ipairs(attrs) do
-        local val = lightningObj:GetAttribute(attr)
-        if val and tonumber(val) then
-            return tonumber(val)
-        end
-    end
-    
-    -- 2. Kiểm tra TextLabel/BillboardGui
-    local timerLabel = lightningObj:FindFirstChildWhichIsA("TextLabel", true)
-    if timerLabel and timerLabel.Text then
-        local timeText = string.match(timerLabel.Text, "%d+%.?%d*")
-        if timeText then
-            return tonumber(timeText)
+--==================================================
+-- STATE
+--==================================================
+
+local FlyEnabled = false
+local SpeedEnabled = false
+local NoClipEnabled = false
+
+local FlySpeed = DEFAULT_FLY_SPEED
+local WalkSpeed = DEFAULT_WALK_SPEED
+
+local Character
+local Humanoid
+local RootPart
+
+local FlyVelocity
+local FlyGyro
+
+local OriginalCanCollide = {}
+
+--==================================================
+-- CHARACTER
+--==================================================
+
+local function SetupCharacter(character)
+    Character = character
+    Humanoid = character:WaitForChild("Humanoid")
+    RootPart = character:WaitForChild("HumanoidRootPart")
+
+    OriginalCanCollide = {}
+
+    for _, obj in ipairs(character:GetDescendants()) do
+        if obj:IsA("BasePart") then
+            OriginalCanCollide[obj] = obj.CanCollide
         end
     end
-    
-    return 3.0 -- Mặc định nếu không tìm thấy
-end
 
--- Hàm kích hoạt ProximityPrompt chuẩn xác
-local function InteractPrompt(prompt)
-    if not prompt or not prompt:IsA("ProximityPrompt") then return false end
-    if fireproximityprompt then
-        fireproximityprompt(prompt)
-        return true
+    if SpeedEnabled then
+        Humanoid.WalkSpeed = WalkSpeed
     end
-    return false
-end
 
--- Hàm xử lý thu thập cây xung quanh điểm sét đánh
-local function ProcessAutoCollect(lightningPos)
-    local character = LocalPlayer.Character
-    if not character then return end
-    local hrp = character:FindFirstChild("HumanoidRootPart")
-    if not hrp then return end
-
-    -- Tối ưu: Chỉ tìm kiếm trong Folder chứa nông sản/cây thay vì quét toàn bộ Workspace
-    local targetsContainer = Workspace:FindFirstChild("Crops") 
-        or Workspace:FindFirstChild("Plants") 
-        or Workspace:FindFirstChild("Trees") 
-        or Workspace
-
-    local foundTarget = false
-
-    for _, obj in ipairs(targetsContainer:GetChildren()) do
-        local nameLower = string.lower(obj.Name)
-        if string.find(nameLower, "tree") or string.find(nameLower, "crop") or string.find(nameLower, "plant") or obj:FindFirstChild("Harvest") then
-            local pos = GetObjectPosition(obj)
-            if pos and (pos - lightningPos).Magnitude <= Config.ScanRadius then
-                -- Tìm Prompt kích hoạt
-                local prompt = obj:FindFirstChildWhichIsA("ProximityPrompt", true)
-                if prompt then
-                    InteractPrompt(prompt)
-                else
-                    -- Fallback: Teleport nhân vật đến vị trí thu hoạch nếu không có prompt
-                    hrp.CFrame = CFrame.new(pos + Vector3.new(0, 3, 0))
-                end
-                
-                Notify("PRO AUTO-COLLECT", "Đã thu hoạch cây thành công!", 2)
-                foundTarget = true
-                break
+    if NoClipEnabled then
+        for _, obj in ipairs(character:GetDescendants()) do
+            if obj:IsA("BasePart") then
+                obj.CanCollide = false
             end
         end
     end
 end
 
--- Hệ thống theo dõi Sét Đánh (Event-Driven Pipeline)
-local function OnInstanceAdded(child)
-    if not Config.AutoCollect and not Config.Countdown then return end
+if Player.Character then
+    task.spawn(SetupCharacter, Player.Character)
+end
 
-    local nameLower = string.lower(child.Name)
-    local isLightning = string.find(nameLower, "lightning") 
-        or string.find(nameLower, "strike") 
-        or string.find(nameLower, "warning") 
-        or child:FindFirstChild("LightningEffect")
+Player.CharacterAdded:Connect(function(character)
 
-    if not isLightning then return end
+    -- Tắt fly cũ nếu nhân vật chết
+    if FlyVelocity then
+        FlyVelocity:Destroy()
+        FlyVelocity = nil
+    end
 
-    -- Đợi 1 frame để đảm bảo dữ liệu Position/Attributes của Object đã load đủ
-    RunService.Heartbeat:Wait()
-    
-    local lightningPos = GetObjectPosition(child)
-    if not lightningPos then return end
+    if FlyGyro then
+        FlyGyro:Destroy()
+        FlyGyro = nil
+    end
 
-    local exactTime = GetLightningDuration(child)
+    SetupCharacter(character)
+end)
 
-    -- Chức năng đếm ngược
-    if Config.Countdown then
-        task.spawn(function()
-            local remaining = math.floor(exactTime)
-            for i = remaining, 1, -1 do
-                Notify("CẢNH BÁO SÉT!", "Sét đánh sau: " .. i .. "s", 1)
-                task.wait(1)
+--==================================================
+-- SCREEN GUI
+--==================================================
+
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "VanKieuMenu"
+ScreenGui.ResetOnSpawn = false
+ScreenGui.IgnoreGuiInset = true
+ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+ScreenGui.Parent = PlayerGui
+
+--==================================================
+-- MAIN FRAME
+--==================================================
+
+local MainFrame = Instance.new("Frame")
+MainFrame.Name = "MainFrame"
+MainFrame.Size = UDim2.new(0, 320, 0, 500)
+MainFrame.Position = UDim2.new(0.5, -160, 0.5, -250)
+MainFrame.BackgroundColor3 = BG
+MainFrame.BorderSizePixel = 0
+MainFrame.Parent = ScreenGui
+
+local MainCorner = Instance.new("UICorner")
+MainCorner.CornerRadius = UDim.new(0, 14)
+MainCorner.Parent = MainFrame
+
+local MainStroke = Instance.new("UIStroke")
+MainStroke.Color = PURPLE
+MainStroke.Thickness = 1.5
+MainStroke.Transparency = 0.15
+MainStroke.Parent = MainFrame
+
+--==================================================
+-- HEADER
+--==================================================
+
+local Header = Instance.new("Frame")
+Header.Size = UDim2.new(1, 0, 0, 75)
+Header.BackgroundTransparency = 1
+Header.Parent = MainFrame
+
+local Title = Instance.new("TextLabel")
+Title.Size = UDim2.new(1, -80, 0, 35)
+Title.Position = UDim2.new(0, 20, 0, 10)
+Title.BackgroundTransparency = 1
+Title.Text = "Văn Kiều"
+Title.TextColor3 = Color3.fromRGB(245, 245, 250)
+Title.TextSize = 25
+Title.Font = Enum.Font.GothamBold
+Title.TextXAlignment = Enum.TextXAlignment.Left
+Title.Parent = Header
+
+local Subtitle = Instance.new("TextLabel")
+Subtitle.Size = UDim2.new(1, -80, 0, 20)
+Subtitle.Position = UDim2.new(0, 21, 0, 43)
+Subtitle.BackgroundTransparency = 1
+Subtitle.Text = "by@VanHoang"
+Subtitle.TextColor3 = Color3.fromRGB(145, 120, 170)
+Subtitle.TextSize = 12
+Subtitle.Font = Enum.Font.Gotham
+Subtitle.TextXAlignment = Enum.TextXAlignment.Left
+Subtitle.Parent = Header
+
+--==================================================
+-- MINIMIZE BUTTON
+--==================================================
+
+local Minimize = Instance.new("TextButton")
+Minimize.Size = UDim2.new(0, 42, 0, 42)
+Minimize.Position = UDim2.new(1, -55, 0, 15)
+Minimize.BackgroundColor3 = BUTTON
+Minimize.Text = "—"
+Minimize.TextColor3 = PURPLE_LIGHT
+Minimize.TextSize = 22
+Minimize.Font = Enum.Font.GothamBold
+Minimize.AutoButtonColor = false
+Minimize.Parent = Header
+
+local MinCorner = Instance.new("UICorner")
+MinCorner.CornerRadius = UDim.new(0, 10)
+MinCorner.Parent = Minimize
+
+--==================================================
+-- CONTENT
+--==================================================
+
+local Content = Instance.new("ScrollingFrame")
+Content.Name = "Content"
+Content.Size = UDim2.new(1, -30, 1, -90)
+Content.Position = UDim2.new(0, 15, 0, 80)
+Content.BackgroundTransparency = 1
+Content.BorderSizePixel = 0
+Content.ScrollBarThickness = 3
+Content.ScrollBarImageColor3 = PURPLE
+Content.CanvasSize = UDim2.new(0, 0, 0, 0)
+Content.Parent = MainFrame
+
+local Padding = Instance.new("UIPadding")
+Padding.PaddingTop = UDim.new(0, 5)
+Padding.PaddingBottom = UDim.new(0, 10)
+Padding.Parent = Content
+
+local Layout = Instance.new("UIListLayout")
+Layout.Padding = UDim.new(0, 10)
+Layout.SortOrder = Enum.SortOrder.LayoutOrder
+Layout.Parent = Content
+
+Layout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+    Content.CanvasSize = UDim2.new(
+        0,
+        0,
+        0,
+        Layout.AbsoluteContentSize.Y + 20
+    )
+end)
+
+--==================================================
+-- TOGGLE CREATOR
+--==================================================
+
+local function CreateToggle(text, callback)
+
+    local Button = Instance.new("TextButton")
+    Button.Size = UDim2.new(1, 0, 0, 50)
+    Button.BackgroundColor3 = BUTTON
+    Button.Text = ""
+    Button.AutoButtonColor = false
+    Button.Parent = Content
+
+    local Corner = Instance.new("UICorner")
+    Corner.CornerRadius = UDim.new(0, 10)
+    Corner.Parent = Button
+
+    local Stroke = Instance.new("UIStroke")
+    Stroke.Color = Color3.fromRGB(45, 45, 55)
+    Stroke.Thickness = 1
+    Stroke.Parent = Button
+
+    local Label = Instance.new("TextLabel")
+    Label.Size = UDim2.new(1, -75, 1, 0)
+    Label.Position = UDim2.new(0, 16, 0, 0)
+    Label.BackgroundTransparency = 1
+    Label.Text = text
+    Label.TextColor3 = Color3.fromRGB(225, 225, 230)
+    Label.TextSize = 15
+    Label.Font = Enum.Font.GothamMedium
+    Label.TextXAlignment = Enum.TextXAlignment.Left
+    Label.Parent = Button
+
+    local Status = Instance.new("TextLabel")
+    Status.Size = UDim2.new(0, 45, 1, 0)
+    Status.Position = UDim2.new(1, -55, 0, 0)
+    Status.BackgroundTransparency = 1
+    Status.Text = "OFF"
+    Status.TextColor3 = Color3.fromRGB(130, 130, 140)
+    Status.TextSize = 12
+    Status.Font = Enum.Font.GothamBold
+    Status.Parent = Button
+
+    local State = false
+
+    local function SetState(value)
+        State = value
+
+        if State then
+            Button.BackgroundColor3 = BUTTON_ON
+            Stroke.Color = PURPLE_LIGHT
+            Status.Text = "ON"
+            Status.TextColor3 = Color3.fromRGB(255, 255, 255)
+        else
+            Button.BackgroundColor3 = BUTTON
+            Stroke.Color = Color3.fromRGB(45, 45, 55)
+            Status.Text = "OFF"
+            Status.TextColor3 = Color3.fromRGB(130, 130, 140)
+        end
+
+        callback(State)
+    end
+
+    Button.Activated:Connect(function()
+        SetState(not State)
+    end)
+
+    return {
+        Button = Button,
+        SetState = SetState
+    }
+end
+
+--==================================================
+-- SLIDER
+--==================================================
+
+local function CreateSlider(name, minValue, maxValue, defaultValue, callback)
+
+    local Frame = Instance.new("Frame")
+    Frame.Size = UDim2.new(1, 0, 0, 65)
+    Frame.BackgroundTransparency = 1
+    Frame.Parent = Content
+
+    local Label = Instance.new("TextLabel")
+    Label.Size = UDim2.new(1, 0, 0, 25)
+    Label.BackgroundTransparency = 1
+    Label.Text = name .. ": " .. tostring(defaultValue)
+    Label.TextColor3 = Color3.fromRGB(190, 190, 200)
+    Label.TextSize = 13
+    Label.Font = Enum.Font.Gotham
+    Label.TextXAlignment = Enum.TextXAlignment.Left
+    Label.Parent = Frame
+
+    local Track = Instance.new("TextButton")
+    Track.Size = UDim2.new(1, 0, 0, 10)
+    Track.Position = UDim2.new(0, 0, 0, 38)
+    Track.BackgroundColor3 = Color3.fromRGB(35, 35, 43)
+    Track.Text = ""
+    Track.AutoButtonColor = false
+    Track.Parent = Frame
+
+    local TrackCorner = Instance.new("UICorner")
+    TrackCorner.CornerRadius = UDim.new(1, 0)
+    TrackCorner.Parent = Track
+
+    local Fill = Instance.new("Frame")
+    Fill.BackgroundColor3 = PURPLE
+    Fill.BorderSizePixel = 0
+    Fill.Size = UDim2.new(
+        (defaultValue - minValue) / (maxValue - minValue),
+        0,
+        1,
+        0
+    )
+    Fill.Parent = Track
+
+    local FillCorner = Instance.new("UICorner")
+    FillCorner.CornerRadius = UDim.new(1, 0)
+    FillCorner.Parent = Fill
+
+    local Knob = Instance.new("Frame")
+    Knob.Size = UDim2.new(0, 18, 0, 18)
+    Knob.AnchorPoint = Vector2.new(0.5, 0.5)
+    Knob.Position = UDim2.new(
+        (defaultValue - minValue) / (maxValue - minValue),
+        0,
+        0.5,
+        0
+    )
+    Knob.BackgroundColor3 = Color3.fromRGB(235, 225, 255)
+    Knob.BorderSizePixel = 0
+    Knob.Parent = Track
+
+    local KnobCorner = Instance.new("UICorner")
+    KnobCorner.CornerRadius = UDim.new(1, 0)
+    KnobCorner.Parent = Knob
+
+    local dragging = false
+
+    local function Update(input)
+
+        local x = input.Position.X
+        local start = Track.AbsolutePosition.X
+        local width = Track.AbsoluteSize.X
+
+        local percent = math.clamp(
+            (x - start) / width,
+            0,
+            1
+        )
+
+        local value = math.floor(
+            minValue + ((maxValue - minValue) * percent) + 0.5
+        )
+
+        Label.Text = name .. ": " .. tostring(value)
+
+        Fill.Size = UDim2.new(percent, 0, 1, 0)
+        Knob.Position = UDim2.new(percent, 0, 0.5, 0)
+
+        callback(value)
+    end
+
+    Track.Activated:Connect(function()
+        -- Mobile tap support
+        local mousePos = UserInputService:GetMouseLocation()
+
+        local fakeInput = {
+            Position = Vector3.new(mousePos.X, mousePos.Y, 0)
+        }
+
+        Update(fakeInput)
+    end)
+
+    Track.InputBegan:Connect(function(input)
+
+        if input.UserInputType == Enum.UserInputType.Touch
+            or input.UserInputType == Enum.UserInputType.MouseButton1 then
+
+            dragging = true
+            Update(input)
+        end
+    end)
+
+    UserInputService.InputChanged:Connect(function(input)
+
+        if not dragging then
+            return
+        end
+
+        if input.UserInputType == Enum.UserInputType.Touch
+            or input.UserInputType == Enum.UserInputType.MouseMovement then
+
+            Update(input)
+        end
+    end)
+
+    UserInputService.InputEnded:Connect(function(input)
+
+        if input.UserInputType == Enum.UserInputType.Touch
+            or input.UserInputType == Enum.UserInputType.MouseButton1 then
+
+            dragging = false
+        end
+    end)
+end
+
+--==================================================
+-- FLY MOBILE CONTROL
+--==================================================
+
+local FlyUp = false
+local FlyDown = false
+
+local FlyControls = Instance.new("Frame")
+FlyControls.Name = "FlyControls"
+FlyControls.Size = UDim2.new(0, 150, 0, 105)
+FlyControls.Position = UDim2.new(1, -170, 1, -125)
+FlyControls.BackgroundTransparency = 1
+FlyControls.Visible = false
+FlyControls.Parent = ScreenGui
+
+local function CreateFlyButton(text, position)
+
+    local Button = Instance.new("TextButton")
+    Button.Size = UDim2.new(0, 65, 0, 45)
+    Button.Position = position
+    Button.BackgroundColor3 = Color3.fromRGB(25, 20, 32)
+    Button.Text = text
+    Button.TextColor3 = Color3.fromRGB(240, 230, 255)
+    Button.TextSize = 18
+    Button.Font = Enum.Font.GothamBold
+    Button.AutoButtonColor = false
+    Button.Parent = FlyControls
+
+    local Corner = Instance.new("UICorner")
+    Corner.CornerRadius = UDim.new(0, 12)
+    Corner.Parent = Button
+
+    local Stroke = Instance.new("UIStroke")
+    Stroke.Color = PURPLE
+    Stroke.Thickness = 1
+    Stroke.Parent = Button
+
+    return Button
+end
+
+local UpButton = CreateFlyButton(
+    "▲",
+    UDim2.new(0, 75, 0, 0)
+)
+
+local DownButton = CreateFlyButton(
+    "▼",
+    UDim2.new(0, 75, 0, 55)
+)
+
+local function HoldButton(button, setter)
+
+    button.InputBegan:Connect(function(input)
+
+        if input.UserInputType == Enum.UserInputType.Touch
+            or input.UserInputType == Enum.UserInputType.MouseButton1 then
+
+            setter(true)
+        end
+    end)
+
+    button.InputEnded:Connect(function(input)
+
+        if input.UserInputType == Enum.UserInputType.Touch
+            or input.UserInputType == Enum.UserInputType.MouseButton1 then
+
+            setter(false)
+        end
+    end)
+end
+
+HoldButton(UpButton, function(value)
+    FlyUp = value
+end)
+
+HoldButton(DownButton, function(value)
+    FlyDown = value
+end)
+
+--==================================================
+-- FLY
+--==================================================
+
+local function StartFly()
+
+    if not Character or not RootPart then
+        return
+    end
+
+    if FlyVelocity then
+        FlyVelocity:Destroy()
+    end
+
+    if FlyGyro then
+        FlyGyro:Destroy()
+    end
+
+    FlyVelocity = Instance.new("BodyVelocity")
+    FlyVelocity.Name = "VanKieuFlyVelocity"
+    FlyVelocity.MaxForce = Vector3.new(
+        math.huge,
+        math.huge,
+        math.huge
+    )
+    FlyVelocity.Velocity = Vector3.zero
+    FlyVelocity.Parent = RootPart
+
+    FlyGyro = Instance.new("BodyGyro")
+    FlyGyro.Name = "VanKieuFlyGyro"
+    FlyGyro.MaxTorque = Vector3.new(
+        math.huge,
+        math.huge,
+        math.huge
+    )
+    FlyGyro.P = 50000
+    FlyGyro.CFrame = RootPart.CFrame
+    FlyGyro.Parent = RootPart
+
+    FlyControls.Visible = true
+end
+
+local function StopFly()
+
+    if FlyVelocity then
+        FlyVelocity:Destroy()
+        FlyVelocity = nil
+    end
+
+    if FlyGyro then
+        FlyGyro:Destroy()
+        FlyGyro = nil
+    end
+
+    FlyControls.Visible = false
+end
+
+--==================================================
+-- NOCLIP
+--==================================================
+
+local function ApplyNoClip()
+
+    if not Character then
+        return
+    end
+
+    for _, obj in ipairs(Character:GetDescendants()) do
+
+        if obj:IsA("BasePart") then
+
+            if OriginalCanCollide[obj] == nil then
+                OriginalCanCollide[obj] = obj.CanCollide
             end
-        end)
-    end
 
-    -- Chức năng Tự động Nhặt Cây
-    if Config.AutoCollect then
-        local waitDuration = math.max(0, exactTime - Config.TriggerOffset)
-        task.delay(waitDuration, function()
-            ProcessAutoCollect(lightningPos)
-        end)
+            obj.CanCollide = false
+        end
     end
 end
 
--- Lắng nghe tất cả các vùng xuất hiện sét có thể có
-Workspace.ChildAdded:Connect(OnInstanceAdded)
-if Workspace:FindFirstChild("Effects") then
-    Workspace.Effects.ChildAdded:Connect(OnInstanceAdded)
+local function RestoreCollision()
+
+    if not Character then
+        return
+    end
+
+    for _, obj in ipairs(Character:GetDescendants()) do
+
+        if obj:IsA("BasePart") then
+
+            if OriginalCanCollide[obj] ~= nil then
+                obj.CanCollide = OriginalCanCollide[obj]
+            end
+        end
+    end
 end
 
--- Giao diện điều khiển (UI Tab)
-local MainTab = Window:MakeTab({
-    Name = "Chức Năng Chính",
-    Icon = "rbxassetid://4483345998",
-    PremiumOnly = false
-})
+--==================================================
+-- BUTTONS
+--==================================================
 
-MainTab:AddLabel("Hệ thống Auto Greedy Growers - Pro Edition")
+local FlyToggle = CreateToggle("Fly", function(state)
 
-MainTab:AddToggle({
-    Name = "Auto Nhặt Cây Trước Sét (Pro)",
-    Default = false,
-    Callback = function(Value)
-        Config.AutoCollect = Value
-    end    
-})
+    FlyEnabled = state
 
-MainTab:AddToggle({
-    Name = "Bộ Đếm Ngược Chuẩn (Countdown)",
-    Default = true,
-    Callback = function(Value)
-        Config.Countdown = Value
-    end    
-})
+    if FlyEnabled then
+        StartFly()
+    else
+        StopFly()
+    end
+end)
 
-MainTab:AddSlider({
-    Name = "Bán kính quét cây (Studs)",
-    Min = 10,
-    Max = 50,
-    Default = 25,
-    Color = Color3.fromRGB(255, 255, 255),
-    Increment = 1,
-    ValueName = "studs",
-    Callback = function(Value)
-        Config.ScanRadius = Value
-    end    
-})
+CreateSlider(
+    "Fly Speed",
+    FLY_SPEED_MIN,
+    FLY_SPEED_MAX,
+    DEFAULT_FLY_SPEED,
+    function(value)
+        FlySpeed = value
+    end
+)
 
-Library:Init()
+local SpeedToggle = CreateToggle("Speed", function(state)
+
+    SpeedEnabled = state
+
+    if Humanoid then
+
+        if SpeedEnabled then
+            Humanoid.WalkSpeed = WalkSpeed
+        else
+            Humanoid.WalkSpeed = 16
+        end
+
+    end
+end)
+
+CreateSlider(
+    "Walk Speed",
+    WALK_SPEED_MIN,
+    WALK_SPEED_MAX,
+    DEFAULT_WALK_SPEED,
+    function(value)
+
+        WalkSpeed = value
+
+        if SpeedEnabled and Humanoid then
+            Humanoid.WalkSpeed = WalkSpeed
+        end
+    end
+)
+
+local NoClipToggle = CreateToggle("NoClip", function(state)
+
+    NoClipEnabled = state
+
+    if NoClipEnabled then
+        ApplyNoClip()
+    else
+        RestoreCollision()
+    end
+end)
+
+--==================================================
+-- MINIMIZE
+--==================================================
+
+local Minimized = false
+
+Minimize.Activated:Connect(function()
+
+    Minimized = not Minimized
+
+    Content.Visible = not Minimized
+
+    if Minimized then
+        MainFrame.Size = UDim2.new(0, 320, 0, 75)
+        Minimize.Text = "+"
+    else
+        MainFrame.Size = UDim2.new(0, 320, 0, 500)
+        Minimize.Text = "—"
+    end
+end)
+
+--==================================================
+-- MAIN LOOP
+--==================================================
+
+RunService.RenderStepped:Connect(function()
+
+    if not Character or not Character.Parent then
+        return
+    end
+
+    -- NOCLIP
+    if NoClipEnabled then
+        ApplyNoClip()
+    end
+
+    -- FLY
+    if FlyEnabled
+        and RootPart
+        and RootPart.Parent
+        and FlyVelocity
+        and FlyGyro then
+
+        local Camera = workspace.CurrentCamera
+
+        if not Camera then
+            return
+        end
+
+        local direction = Vector3.zero
+
+        -- Roblox mobile joystick
+        if Humanoid then
+            local moveDirection = Humanoid.MoveDirection
+
+            if moveDirection.Magnitude > 0 then
+                direction += moveDirection
+            end
+        end
+
+        -- Camera-based forward direction
+        if direction.Magnitude > 0 then
+
+            local horizontal = Vector3.new(
+                direction.X,
+                0,
+                direction.Z
+            )
+
+            if horizontal.Magnitude > 0 then
+                direction = horizontal.Unit
+            end
+        end
+
+        -- Mobile lên / xuống
+        if FlyUp then
+            direction += Vector3.new(0, 1, 0)
+        end
+
+        if FlyDown then
+            direction += Vector3.new(0, -1, 0)
+        end
+
+        -- Giới hạn vector
+        if direction.Magnitude > 1 then
+            direction = direction.Unit
+        end
+
+        FlyVelocity.Velocity = direction * FlySpeed
+
+        -- Nhìn theo camera
+        FlyGyro.CFrame = Camera.CFrame
+    end
+end)
+
+--==================================================
+-- INITIAL SETTINGS
+--==================================================
+
+MainFrame.Visible = true
+
+print("╔══════════════════════════════════╗")
+print("       Văn Kiều Menu Loaded")
+print("             by@VanHoang")
+print("╚══════════════════════════════════╝")
